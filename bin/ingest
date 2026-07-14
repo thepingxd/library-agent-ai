@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 import shutil
 import zipfile
 import datetime
@@ -23,6 +24,7 @@ from collections import Counter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _lib  # noqa: E402
+import _log  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 INBOX = ROOT / "_inbox"
@@ -42,6 +44,7 @@ SCRIPT = {"js", "mjs", "ts", "jsx", "tsx", "vue", "svelte"}
 CODEGEN = {"py", "go", "rb", "php", "java", "rs", "c", "cpp", "sh", "sql"}
 DOC = {"md", "txt", "pdf", "doc", "docx", "rtf"}
 COLOR = {"ase", "aco", "clr", "gpl"}
+ARCHIVE_EXTS = {"zip", "rar", "7z", "tar", "gz", "tgz"}
 MANIFEST = {"package.json", "pyproject.toml", "go.mod", "gemfile",
             "composer.json", "cargo.toml", "requirements.txt"}
 
@@ -216,18 +219,25 @@ def enrich_ai(item_dir: Path, meta: dict) -> bool:
     if shutil.which("claude") is None:
         return False
     imgs = [str(f.relative_to(item_dir)) for f in item_dir.rglob("*")
-            if f.suffix.lower().lstrip(".") in (RASTER | VECTOR)][:8]
+            if f.suffix.lower().lstrip(".") in (RASTER | VECTOR)][:12]
     tree = [str(f.relative_to(item_dir)) for f in sorted(item_dir.rglob("*"))
-            if f.is_file() and f.name != _lib.META_NAME][:60]
+            if f.is_file() and f.name != _lib.META_NAME][:150]
+    n_files = sum(1 for f in item_dir.rglob("*") if f.is_file())
     text_ctx = gather_text(item_dir)
     prompt = f"""Você é um bibliotecário de design catalogando um recurso para
 uma biblioteca de referência de desenvolvimento. O objetivo é que, no futuro,
-uma IA busque este item por tema e ESTUDE como ele foi feito para reusar o
-design. Seja concreto e útil para reuso.
+uma IA APRENDA este material por completo para reusá-lo como referência de
+design. NÃO estude só um pedaço: explore o projeto inteiro.
 
-Tipo já classificado: {meta['tipo']}. Pasta: {item_dir}.
-Arquivos (use as ferramentas Read/Glob para inspecionar de verdade —
-principalmente as imagens e o HTML/CSS, não chute):
+Tipo já classificado: {meta['tipo']}. Pasta: {item_dir}. ({n_files} arquivos)
+
+IMPORTANTE — investigue de verdade com as ferramentas Read e Glob:
+- Use Glob para mapear TODAS as páginas/telas (ex.: **/*.html) e componentes.
+- Abra (Read) uma amostra representativa das páginas e o(s) CSS/tema principais.
+- Inspecione as imagens de preview.
+Não descreva pelo nome do arquivo: olhe o conteúdo.
+
+Amostra de arquivos (há {n_files} no total — use Glob para ver o resto):
 {chr(10).join(tree) or '(nenhum)'}
 
 Imagens de preview:
@@ -240,21 +250,24 @@ Responda com DOIS blocos, nesta ordem:
 
 Bloco 1 — ```yaml com exatamente estes campos:
 descricao: uma frase objetiva em português (o que é / quando usar)
-dominio: lista de temas/verticais em kebab-case (ex.: academia, fitness, saude)
-tags: lista de 4 a 8 tags curtas em kebab-case (tema + tech + tipo de página)
+dominio: lista de temas/verticais em kebab-case (ex.: dashboard, admin, saas)
+tags: lista de 4 a 10 tags curtas em kebab-case (tema + tech + tipo de tela)
 estilo: lista de 0 a 3 estilos visuais (flat, minimal, dark, gradient, etc.)
 licenca: uma de [uso-livre, atribuicao, comercial, pessoal, desconhecida]
 
-Bloco 2 — ```markdown com uma ficha de estudo curta e prática:
+Bloco 2 — ```markdown com uma ficha de estudo COMPLETA (aprofundada; este é o
+material de aprendizado, capriche):
 ## Propósito e público
-## Estrutura / seções (liste as seções ou telas principais)
-## Design (paleta de cores com hex se der, tipografia, layout, padrões)
+## Inventário (liste TODAS as páginas/telas e os componentes reutilizáveis)
+## Sistema de design (paleta com hex, tipografia com nomes/pesos, espaçamento,
+   grid, bordas/sombras, modo claro/escuro se houver)
+## Padrões e componentes (como cards, tabelas, forms, navegação são construídos)
 ## Como reutilizar (o que copiar/adaptar ao construir algo do mesmo tema)
 """
     try:
         out = subprocess.run(
             ["claude", "-p", prompt, "--allowedTools", "Read", "Glob"],
-            cwd=str(item_dir), capture_output=True, text=True, timeout=240,
+            cwd=str(item_dir), capture_output=True, text=True, timeout=600,
         )
     except Exception as e:
         log(f"IA indisponível ({e}); mantendo descrição pendente")
@@ -292,7 +305,18 @@ Bloco 2 — ```markdown com uma ficha de estudo curta e prática:
 # ---------------------------------------------------------------------------
 def process(src: Path, use_ai: bool) -> None:
     print(f"\n▸ {src.name}")
+    t0 = time.time()
     slug = slugify(src.name)
+    size = src.stat().st_size
+    sha = _log.sha256_file(src)
+    _log.event("start", src=src.name, size=size, sha=sha[:12])
+
+    dup = _log.find_by_hash(sha)
+    if dup:
+        log(f"⚠ já ingerido em {dup.get('ts')} → {dup.get('destino')} "
+            "(processando mesmo assim)")
+        _log.event("duplicate", src=src.name, ja_em=dup.get("destino"))
+
     staging = PROCESSING / slug
     if staging.exists():
         shutil.rmtree(staging)
@@ -301,12 +325,33 @@ def process(src: Path, use_ai: bool) -> None:
     files = [f for f in staging.rglob("*") if f.is_file()]
     if not files:
         log("vazio; ignorando")
+        _log.event("skip", src=src.name, motivo="vazio")
         shutil.rmtree(staging, ignore_errors=True)
         return
 
+    ext_top = dict(Counter(f.suffix.lower().lstrip(".")
+                           for f in files if f.suffix).most_common(8))
+    _log.event("extract", src=src.name, files=len(files), ext=ext_top)
+
+    # bundle? (pacote cujo conteúdo são só outros arquivos compactados)
+    archives = sorted(f.name for f in files
+                      if f.suffix.lower().lstrip(".") in ARCHIVE_EXTS)
+    bundle_obs = ""
+    if archives and len(archives) == len(files):
+        log(f"⚠ bundle com {len(archives)} arquivos aninhados — não dá pra "
+            "catalogar como um item só:")
+        for a in archives:
+            log(f"    - {a}")
+        log("→ escolha a variante desejada e rode, ex.:")
+        log(f'    dlib ingest "_review/{slug}/{archives[0]}"')
+        bundle_obs = "bundle; variantes: " + "; ".join(archives)
+
     cat, conf, formato, estilo = classify(files, src.name)
+    if bundle_obs:
+        cat, conf = "_review", "baixa"
     tipo = TIPO.get(cat, "desconhecido")
     log(f"classificado: {cat}  (confiança: {conf})")
+    _log.event("classify", src=src.name, cat=cat, conf=conf)
 
     dest = unique_dir((ROOT / cat) / slug)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -325,13 +370,19 @@ def process(src: Path, use_ai: bool) -> None:
         "licenca": "desconhecida",
         "arquivo_original": src.name,
         "confianca": conf,
-        "obs": "revisar categoria manualmente" if cat == "_review" else "",
+        "obs": bundle_obs or ("revisar categoria manualmente"
+                              if cat == "_review" else ""),
     }
 
+    ai_status = "off"
     if use_ai and cat != "_review":
         log("enriquecendo com IA…")
-        if enrich_ai(dest, meta):
+        ok = enrich_ai(dest, meta)
+        ai_status = "ok" if ok else "falhou"
+        if ok:
             log(f"descrição: {meta['descricao']}")
+    elif cat == "_review":
+        ai_status = "pulado-review"
     _lib.write_meta(dest, meta)
 
     # arquiva o original
@@ -339,7 +390,26 @@ def process(src: Path, use_ai: bool) -> None:
     archived = unique_dir(ARCHIVE / src.name) if (ARCHIVE / src.name).exists() \
         else ARCHIVE / src.name
     shutil.move(str(src), str(archived))
+
+    dur = round(time.time() - t0, 1)
     log(f"→ {dest.relative_to(ROOT)}  (original em _archive/)")
+    _log.event("done", src=src.name, dest=str(dest.relative_to(ROOT)),
+               ai=ai_status, card=(dest / "CARD.md").exists(), dur=f"{dur}s")
+    _log.ledger_append({
+        "acao": "ingest",
+        "source": src.name,
+        "sha256": sha,
+        "size_bytes": size,
+        "n_files": len(files),
+        "ext_top": ext_top,
+        "categoria": cat,
+        "confianca": conf,
+        "destino": str(dest.relative_to(ROOT)),
+        "ai": ai_status,
+        "card": (dest / "CARD.md").exists(),
+        "duracao_s": dur,
+        "erro": None,
+    })
 
 
 def main() -> None:
@@ -351,7 +421,7 @@ def main() -> None:
         targets = [Path(a).resolve() for a in args]
     else:
         targets = sorted(f for f in INBOX.iterdir()
-                         if f.is_file() and f.name != ".keep")
+                         if f.is_file() and not f.name.startswith("."))
 
     if not targets:
         print("Nada para processar. Solte arquivos em _inbox/ ou passe um caminho.")
@@ -365,6 +435,9 @@ def main() -> None:
             process(t, use_ai)
         except Exception as e:
             print(f"! erro processando {t.name}: {e}")
+            _log.event("error", src=t.name, erro=repr(str(e)))
+            _log.ledger_append({"acao": "error", "source": t.name,
+                                "erro": str(e)})
 
     # regenera o índice
     subprocess.run([sys.executable, str(ROOT / "bin" / "reindex")])

@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""log — histórico de ingestões da dev-library.
+
+Uso:
+    dlib log            últimas 20 linhas do ingest.log (legível)
+    dlib log -n 50      últimas N linhas
+    dlib log --json     histórico estruturado (ledger.jsonl), resumido
+"""
+from __future__ import annotations
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _log  # noqa: E402
+
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f}{unit}"
+        n /= 1024
+    return f"{n:.0f}TB"
+
+
+def main():
+    argv = sys.argv[1:]
+    n = 20
+    if "-n" in argv:
+        i = argv.index("-n")
+        n = int(argv[i + 1])
+
+    if "--json" in argv:
+        recs = _log.ledger_records()[-n:]
+        if not recs:
+            print("(sem histórico ainda)")
+            return
+        print(f"\n{len(recs)} registro(s) do ledger:\n")
+        for r in recs:
+            if r.get("acao") == "ingest":
+                print(f"  {r.get('ts')}  {r.get('source')}")
+                print(f"     → {r.get('destino')}  [{r.get('categoria')}"
+                      f"/{r.get('confianca')}]  IA:{r.get('ai')}  "
+                      f"{r.get('n_files')} arq · {human(r.get('size_bytes', 0))}"
+                      f" · {r.get('duracao_s')}s")
+            else:
+                print(f"  {r.get('ts')}  [{r.get('acao')}] {r.get('source')}"
+                      f"  {r.get('erro', '')}")
+        print()
+        return
+
+    if not _log.INGEST_LOG.exists():
+        print("(sem log ainda — rode `dlib ingest`)")
+        return
+    lines = _log.INGEST_LOG.read_text(encoding="utf-8").splitlines()
+    for ln in lines[-n:]:
+        print(ln)
+
+
+if __name__ == "__main__":
+    main()

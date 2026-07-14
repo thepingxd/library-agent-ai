@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""status — panorama atual da dev-library."""
+from __future__ import annotations
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lib   # noqa: E402
+import _log   # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+CATS = ["templates", "boilerplates", "components", "snippets",
+        "brand/logos", "brand/colors", "brand/fonts",
+        "assets/images", "assets/illustrations", "assets/icons",
+        "references", "prompts"]
+
+
+def count_dir(rel):
+    d = ROOT / rel
+    return [x for x in d.iterdir() if x.is_dir()] if d.exists() else []
+
+
+def real_files(rel):
+    d = ROOT / rel
+    return [f for f in d.iterdir()
+            if f.is_file() and not f.name.startswith(".")] if d.exists() else []
+
+
+def main():
+    print("\n📚 dev-library —", ROOT)
+
+    pend_inbox = real_files("_inbox")
+    review = count_dir("_review")
+    proc = count_dir("_processing")
+
+    print("\nFila:")
+    print(f"  _inbox/       {len(pend_inbox)} arquivo(s) aguardando `dlib ingest`")
+    print(f"  _processing/  {len(proc)} em andamento")
+    print(f"  _review/      {len(review)} aguardando decisão manual")
+    if review:
+        for d in review:
+            print(f"                - {d.name}")
+
+    print("\nCatálogo:")
+    total = pend_ia = 0
+    for cat in CATS:
+        items = [d for d in count_dir(cat) if (d / _lib.META_NAME).exists()]
+        if not items:
+            continue
+        n_card = sum((d / "CARD.md").exists() for d in items)
+        n_pia = sum((_lib.read_meta(d) or {}).get("descricao") == "[pendente-ia]"
+                    for d in items)
+        total += len(items)
+        pend_ia += n_pia
+        flag = f"  ({n_pia} sem descrição IA)" if n_pia else ""
+        print(f"  {cat:<22} {len(items):>3} item(s) · {n_card} com ficha{flag}")
+
+    print(f"\n  TOTAL: {total} item(s) catalogado(s), {pend_ia} pendente(s) de IA")
+
+    recs = [r for r in _log.ledger_records() if r.get("acao") == "ingest"]
+    if recs:
+        last = recs[-1]
+        print(f"\nÚltima ingestão: {last.get('ts')} · {last.get('source')} "
+              f"→ {last.get('destino')} ({last.get('duracao_s')}s)")
+    print()
+
+
+if __name__ == "__main__":
+    main()

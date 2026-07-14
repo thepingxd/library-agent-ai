@@ -36,3 +36,6 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs e ledger (histórico pessoal)
+/_logs/

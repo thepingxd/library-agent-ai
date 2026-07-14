@@ -23,7 +23,10 @@ comece por aqui.
 | `bin/ingest`     | Pipeline: extrai → classifica → metadados → IA → arquiva.   |
 | `bin/find`       | Busca ranqueada por palavra-chave (+ rerank opcional por IA).|
 | `bin/reindex`    | Regenera `INDEX.md` a partir dos `_meta.yaml`.              |
+| `bin/status`     | Panorama atual: fila, catálogo por categoria, última run.   |
+| `bin/log`        | Histórico de ingestões (`ingest.log` ou `ledger.jsonl`).    |
 | `bin/_lib.py`    | Leitura/escrita dos `_meta.yaml` (parser YAML mínimo próprio).|
+| `bin/_log.py`    | Log (`_logs/ingest.log`) e ledger (`_logs/ledger.jsonl`) + sha256.|
 
 ## Pipeline de ingestão (`bin/ingest`)
 
@@ -68,6 +71,21 @@ semelhança semântica. `--tipo` tolera singular/plural.
 Na ingestão, o `claude -p` roda com `--allowedTools Read Glob` **dentro da pasta
 do item**, então ele realmente abre o HTML/CSS e inspeciona as imagens antes de
 escrever a ficha — não descreve só pelo nome do arquivo.
+
+## Logs e ledger (`_logs/`, `bin/_log.py`)
+
+Cada ingestão emite **dois registros** (a pasta `_logs/` é ignorada pelo git —
+é histórico pessoal):
+
+- `ingest.log` — linhas legíveis com timestamp e tipo de evento
+  (`start`, `extract`, `classify`, `duplicate`, `done`, `error`).
+- `ledger.jsonl` — um JSON por item: `source`, `sha256`, `size_bytes`,
+  `n_files`, `ext_top`, `categoria`, `confianca`, `destino`, `ai`, `card`,
+  `duracao_s`, `erro`.
+
+O `sha256` habilita **deduplicação**: antes de processar, `ingest` consulta o
+ledger (`find_by_hash`) e avisa se aquele arquivo já foi ingerido. `bin/status`
+e `bin/log` leem esses registros para reportar o estado.
 
 ## Convenções para PRs
 

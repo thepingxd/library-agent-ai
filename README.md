@@ -79,6 +79,11 @@ dlib find academia fitness                   # busca por tema
 dlib find "loja de roupa" --tipo templates   # filtra por tipo
 dlib find crossfit --ai                      # reordena por semelhança (IA)
 
+# acompanhar
+dlib status                                  # panorama: fila, catálogo, última run
+dlib log                                     # histórico legível de ingestões
+dlib log --json                              # histórico estruturado (ledger)
+
 # manutenção
 dlib reindex                                 # regenera INDEX.md
 ```
@@ -93,9 +98,12 @@ templates/  boilerplates/  components/  snippets/
 brand/{logos,colors,fonts}
 assets/{images,illustrations,icons}
 references/  prompts/
-_inbox/  _processing/  _review/  _archive/   ← pastas de sistema
+_inbox/  _processing/  _review/  _archive/  _logs/   ← pastas de sistema
 bin/        AGENTS.md  TAGS.md  INDEX.md
 ```
+
+Cada ingestão é registrada em `_logs/`: `ingest.log` (legível) e `ledger.jsonl`
+(um JSON por item, com sha256 para detectar duplicatas). Veja com `dlib log`.
 
 - **[AGENTS.md](AGENTS.md)** — como um agente deve buscar e estudar aqui.
 - **[TAGS.md](TAGS.md)** — vocabulário controlado de tags e tipos.

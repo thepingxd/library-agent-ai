@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import time
+import fcntl
 import shutil
 import zipfile
 import datetime
@@ -412,11 +413,32 @@ def process(src: Path, use_ai: bool) -> None:
     })
 
 
+def _acquire_lock():
+    """Serializa ingestões (manual + watcher) via flock. Bloqueante."""
+    (ROOT / "_logs").mkdir(exist_ok=True)
+    lockf = open(ROOT / "_logs" / ".ingest.lock", "w")
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("  · aguardando outra ingestão em andamento…")
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+    return lockf
+
+
 def main() -> None:
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     use_ai = "--no-ai" not in sys.argv and \
         os.environ.get("INGEST_NO_AI") not in ("1", "true")
 
+    lockf = _acquire_lock()
+    try:
+        _run(args, use_ai)
+    finally:
+        fcntl.flock(lockf, fcntl.LOCK_UN)
+        lockf.close()
+
+
+def _run(args, use_ai) -> None:
     if args:
         targets = [Path(a).resolve() for a in args]
     else:

@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""watch — vigia a _inbox/ e dispara `ingest` automaticamente.
+
+Roda em loop (pensado para um serviço systemd de usuário). Só processa um
+arquivo quando o tamanho dele estabiliza (não pega download pela metade) e
+serializa via o lock do próprio ingest. Encerra limpo em SIGTERM/SIGINT.
+
+Ajustes por variável de ambiente:
+  WATCH_POLL     segundos entre varreduras        (padrão 3)
+  WATCH_STABLE   segundos de tamanho estável       (padrão 8)
+  INGEST_NO_AI   1 = classifica sem IA (repassado ao ingest)
+"""
+from __future__ import annotations
+import os
+import sys
+import time
+import signal
+import subprocess
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _log  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+INBOX = ROOT / "_inbox"
+INGEST = ROOT / "bin" / "ingest"
+
+POLL = float(os.environ.get("WATCH_POLL", "3"))
+STABLE = float(os.environ.get("WATCH_STABLE", "8"))
+
+_running = True
+
+
+def _stop(*_a):
+    global _running
+    _running = False
+
+
+def pending():
+    return [f for f in INBOX.iterdir()
+            if f.is_file() and not f.name.startswith(".")]
+
+
+def main():
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    _log.event("watch-start", poll=POLL, stable=STABLE)
+    print(f"[watch] vigiando {INBOX} (poll={POLL}s, stable={STABLE}s)")
+
+    seen: dict[str, tuple[int, float]] = {}   # nome -> (tamanho, ts_estável)
+    failed: set[str] = set()
+
+    while _running:
+        current = {f.name for f in pending()}
+        # esquece arquivos que sumiram (já ingeridos)
+        for name in list(seen):
+            if name not in current:
+                seen.pop(name, None)
+        failed &= current
+
+        for f in pending():
+            if f.name in failed:
+                continue
+            try:
+                size = f.stat().st_size
+            except FileNotFoundError:
+                continue
+            prev = seen.get(f.name)
+            if prev is None or prev[0] != size:
+                seen[f.name] = (size, time.time())      # mudou: reinicia timer
+                continue
+            if time.time() - prev[1] < STABLE:
+                continue                                 # ainda estabilizando
+
+            # pronto para ingerir
+            _log.event("watch-detect", src=f.name, size=size)
+            print(f"[watch] detectado: {f.name} → ingerindo…")
+            rc = subprocess.run([sys.executable, str(INGEST), str(f)]).returncode
+            seen.pop(f.name, None)
+            if rc != 0:
+                failed.add(f.name)
+                _log.event("watch-error", src=f.name, rc=rc)
+                print(f"[watch] ! falha ao ingerir {f.name} (rc={rc}); "
+                      "ignorando até reiniciar o serviço")
+
+        for _ in range(int(POLL * 10)):
+            if not _running:
+                break
+            time.sleep(0.1)
+
+    _log.event("watch-stop")
+    print("[watch] encerrado.")
+
+
+if __name__ == "__main__":
+    main()

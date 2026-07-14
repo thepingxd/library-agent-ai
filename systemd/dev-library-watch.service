@@ -1,0 +1,16 @@
+[Unit]
+Description=dev-library — vigia _inbox/ e cataloga arquivos automaticamente
+Documentation=https://github.com/thepingxd/library-agent-ai
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/dev-library/bin/watch
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# Para catalogar sem IA no automático (rodar a IA em lote depois), descomente:
+# Environment=INGEST_NO_AI=1
+
+[Install]
+WantedBy=default.target

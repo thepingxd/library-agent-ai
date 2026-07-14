@@ -91,6 +91,29 @@ dlib reindex                                 # regenera INDEX.md
 Cada resultado aponta para a pasta do item e seu `CARD.md` — a leitura de design
 já pronta para a IA (ou você) estudar.
 
+## Automação (opcional): catalogar sozinho
+
+Para que qualquer arquivo solto na `_inbox/` seja catalogado automaticamente,
+há um watcher que roda como **serviço systemd de usuário** (zero dependências,
+detecta em segundos, serializa via lock, persiste após logout):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp systemd/dev-library-watch.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now dev-library-watch.service
+loginctl enable-linger "$USER"        # roda mesmo deslogado (pode pedir sudo)
+
+systemctl --user status dev-library-watch.service   # ver estado
+journalctl --user -u dev-library-watch -f           # acompanhar ao vivo
+```
+
+Para testar em primeiro plano, sem serviço: `dlib watch`. O passo de IA pode
+ser adiado no automático definindo `INGEST_NO_AI=1` no arquivo do serviço.
+
+> Alternativas ao serviço: um `cron`/systemd-timer chamando `dlib ingest` a cada
+> N minutos, ou o agendador do seu próprio agente. A ação é sempre `dlib ingest`.
+
 ## Estrutura
 
 ```

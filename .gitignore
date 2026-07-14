@@ -1,0 +1,38 @@
+# ==========================================================================
+#  library-agent-ai — o REPO versiona o framework, não os seus assets.
+#  Cada pessoa clona e popula a própria biblioteca localmente.
+# ==========================================================================
+
+# Conteúdo pessoal — NÃO versionar (assets baixados, seus itens catalogados)
+/templates/*
+/boilerplates/*
+/components/*
+/snippets/*
+/brand/logos/*
+/brand/colors/*
+/brand/fonts/*
+/assets/images/*
+/assets/illustrations/*
+/assets/icons/*
+/references/*
+/prompts/*
+
+# Pastas de sistema do pipeline
+/_inbox/*
+/_processing/*
+/_review/*
+/_archive/*
+
+# ...mas preserva a estrutura de pastas vazia
+!**/.gitkeep
+
+# Índice gerado (lista itens pessoais)
+/INDEX.md
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db

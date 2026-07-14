@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# dlib — front-end global da dev-library (library-agent-ai)
+# A localização da biblioteca pode ser sobrescrita com DEV_LIBRARY_HOME.
+set -euo pipefail
+
+# Resolve o diretório real deste script (mesmo se chamado via symlink)
+SRC="${BASH_SOURCE[0]}"
+while [ -h "$SRC" ]; do
+  DIR="$(cd -P "$(dirname "$SRC")" && pwd)"
+  SRC="$(readlink "$SRC")"
+  [[ $SRC != /* ]] && SRC="$DIR/$SRC"
+done
+BIN_DIR="$(cd -P "$(dirname "$SRC")" && pwd)"
+
+# Biblioteca = onde o DEV_LIBRARY_HOME apontar, senão a raiz deste checkout
+LIB="${DEV_LIBRARY_HOME:-$(dirname "$BIN_DIR")}"
+
+cmd="${1:-help}"; [ $# -gt 0 ] && shift || true
+case "$cmd" in
+  ingest|find|reindex)
+    exec "$LIB/bin/$cmd" "$@" ;;
+  ""|help|-h|--help)
+    cat <<EOF
+dlib — biblioteca de referências para desenvolvimento
+biblioteca: $LIB
+
+uso: dlib <comando> [args]
+
+  ingest [arquivo] [--no-ai]        processa _inbox/ (ou um arquivo) e cataloga
+  find <termos> [--tipo T] [--ai]   busca por tema/palavra-chave (-n N limita)
+  reindex                           regenera INDEX.md
+
+exemplos:
+  dlib ingest ~/Downloads/template-academia.zip
+  dlib find academia fitness --tipo templates
+  dlib find "loja de roupa" --ai
+EOF
+    ;;
+  *)
+    echo "dlib: comando desconhecido '$cmd' (use 'dlib help')" >&2
+    exit 1 ;;
+esac

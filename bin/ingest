@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+"""ingest — pipeline de ingestão da dev-library.
+
+Uso:
+    bin/ingest                 processa tudo que estiver em _inbox/
+    bin/ingest arquivo.zip     processa um arquivo específico
+    bin/ingest --no-ai         pula o enriquecimento por IA
+
+Fluxo: extrai -> classifica pelo conteúdo -> gera _meta.yaml ->
+enriquece com IA -> arquiva na categoria certa (ou em _review/ se incerto).
+O arquivo original vai para _archive/. Nada é apagado.
+"""
+from __future__ import annotations
+import os
+import re
+import sys
+import shutil
+import zipfile
+import datetime
+import subprocess
+from pathlib import Path
+from collections import Counter
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lib  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+INBOX = ROOT / "_inbox"
+PROCESSING = ROOT / "_processing"
+REVIEW = ROOT / "_review"
+ARCHIVE = ROOT / "_archive"
+
+JUNK = {".ds_store", "thumbs.db", "__macosx"}
+META_HINT = {"readme", "license", "licence", "changelog", "credits"}
+
+FONT = {"ttf", "otf", "woff", "woff2", "eot"}
+RASTER = {"jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "psd"}
+VECTOR = {"svg", "ai", "eps"}
+WEB = {"html", "htm"}
+STYLE = {"css", "scss", "sass", "less"}
+SCRIPT = {"js", "mjs", "ts", "jsx", "tsx", "vue", "svelte"}
+CODEGEN = {"py", "go", "rb", "php", "java", "rs", "c", "cpp", "sh", "sql"}
+DOC = {"md", "txt", "pdf", "doc", "docx", "rtf"}
+COLOR = {"ase", "aco", "clr", "gpl"}
+MANIFEST = {"package.json", "pyproject.toml", "go.mod", "gemfile",
+            "composer.json", "cargo.toml", "requirements.txt"}
+
+# categoria (pasta) -> tag canônica de tipo (singular, ver TAGS.md)
+TIPO = {
+    "templates": "template", "boilerplates": "boilerplate",
+    "components": "component", "snippets": "snippet",
+    "brand/logos": "logo", "brand/colors": "colors", "brand/fonts": "font",
+    "assets/images": "image", "assets/illustrations": "illustration",
+    "assets/icons": "icon", "references": "doc", "prompts": "prompt",
+}
+
+
+def slugify(name: str) -> str:
+    name = re.sub(r"\.(zip|tar|gz|tgz|rar|7z)$", "", name, flags=re.I)
+    name = re.sub(r"[^a-zA-Z0-9]+", "-", name).strip("-").lower()
+    return name or "item"
+
+
+def log(msg: str) -> None:
+    print(f"  {msg}")
+
+
+# ---------------------------------------------------------------------------
+# Classificação
+# ---------------------------------------------------------------------------
+def collect(files: list[Path]):
+    exts = Counter()
+    names = []
+    total = 0
+    for f in files:
+        low = f.name.lower()
+        if low in JUNK or any(p.lower() in JUNK for p in f.parts):
+            continue
+        names.append(low)
+        ext = f.suffix.lower().lstrip(".")
+        if ext:
+            exts[ext] += 1
+            if low not in META_HINT and f.stem.lower() not in META_HINT:
+                total += 1
+    return exts, names, total
+
+
+def classify(files: list[Path], source_name: str):
+    """Retorna (categoria_relativa, confianca, formato[list], estilo[list])."""
+    exts, names, total = collect(files)
+    blob = " ".join(names + [source_name.lower()])
+    basenames = {Path(n).name for n in names}
+
+    def cnt(group):
+        return sum(exts[e] for e in group)
+
+    def kw(*words):
+        return any(w in blob for w in words)
+
+    fonts = cnt(FONT)
+    raster = cnt(RASTER)
+    web = cnt(WEB)
+    style = cnt(STYLE)
+    script = cnt(SCRIPT)
+    codegen = cnt(CODEGEN)
+    doc = cnt(DOC)
+    color = cnt(COLOR)
+    svg = exts.get("svg", 0)
+    ai_eps = exts.get("ai", 0) + exts.get("eps", 0)
+    has_manifest = bool(basenames & MANIFEST)
+
+    formato = [e for e, _ in exts.most_common(4)]
+
+    estilo = [s for s in ("flat", "3d", "minimal", "retro", "gradient",
+                          "line-art", "isometric", "hand-drawn")
+              if s.replace("-", "") in blob.replace("-", "")]
+
+    cat, conf = None, "baixa"
+
+    if fonts > 0 and fonts >= max(raster, script, web):
+        cat, conf = "brand/fonts", "alta"
+    elif color > 0 or kw("palette", "swatch", "swatches"):
+        cat, conf = "brand/colors", "alta"
+    elif web > 0 and (style > 0 or script > 0):
+        cat, conf = "templates", "alta"
+    elif has_manifest and web == 0 and total >= 8:
+        cat, conf = "boilerplates", "alta"
+    elif svg > 0 or ai_eps > 0:
+        if kw("logo", "logotype", "brand-mark", "branding") and total <= 12:
+            cat, conf = "brand/logos", "alta"
+        elif kw("icon", "iconset", "glyph") or svg >= 8:
+            cat, conf = "assets/icons", "alta"
+        elif ai_eps > 0 or kw("illustration", "illustr", "vector", "character",
+                              "scene", "artwork"):
+            cat, conf = "assets/illustrations", "alta"
+        elif total <= 4:
+            cat, conf = "brand/logos", "media"
+        else:
+            cat, conf = "assets/illustrations", "media"
+    elif raster > 0 and raster >= script + web + doc:
+        if kw("logo") and raster <= 4:
+            cat, conf = "brand/logos", "media"
+        else:
+            cat, conf = "assets/images", "alta"
+    elif script > 0:
+        if script <= 3 and web == 0 and total <= 6:
+            cat, conf = "components", "media"
+        else:
+            cat, conf = "snippets", "media"
+    elif codegen > 0 and total <= 6:
+        cat, conf = "snippets", "media"
+    elif doc > 0 and doc >= total * 0.5:
+        if kw("prompt"):
+            cat, conf = "prompts", "alta"
+        else:
+            cat, conf = "references", "alta"
+
+    if cat is None:
+        cat, conf = "_review", "baixa"
+    return cat, conf, formato, estilo
+
+
+# ---------------------------------------------------------------------------
+# Extração / posicionamento
+# ---------------------------------------------------------------------------
+def extract(src: Path, dest: Path) -> Path:
+    dest.mkdir(parents=True, exist_ok=True)
+    if zipfile.is_zipfile(src):
+        with zipfile.ZipFile(src) as z:
+            z.extractall(dest)
+    else:
+        shutil.copy2(src, dest / src.name)
+    # remove lixo do macOS
+    for junk in list(dest.rglob("__MACOSX")) + list(dest.rglob(".DS_Store")):
+        if junk.is_dir():
+            shutil.rmtree(junk, ignore_errors=True)
+        else:
+            junk.unlink(missing_ok=True)
+    # se o zip embrulhou tudo numa única pasta, desembrulha
+    entries = [e for e in dest.iterdir() if e.name not in (".DS_Store",)]
+    if len(entries) == 1 and entries[0].is_dir():
+        inner = entries[0]
+        for item in list(inner.iterdir()):
+            shutil.move(str(item), str(dest / item.name))
+        inner.rmdir()
+    return dest
+
+
+def unique_dir(base: Path) -> Path:
+    if not base.exists():
+        return base
+    i = 2
+    while (cand := base.parent / f"{base.name}-{i}").exists():
+        i += 1
+    return cand
+
+
+# ---------------------------------------------------------------------------
+# Enriquecimento por IA (via claude CLI, best-effort)
+# ---------------------------------------------------------------------------
+def gather_text(item_dir: Path, limit: int = 4000) -> str:
+    buf = []
+    for f in sorted(item_dir.rglob("*")):
+        if f.is_file() and f.suffix.lower().lstrip(".") in {"md", "txt", "json"}:
+            try:
+                buf.append(f"# {f.name}\n{f.read_text(errors='ignore')[:1500]}")
+            except Exception:
+                pass
+        if sum(len(b) for b in buf) > limit:
+            break
+    return "\n\n".join(buf)[:limit]
+
+
+def enrich_ai(item_dir: Path, meta: dict) -> bool:
+    """Gera campos estruturados + uma ficha de estudo CARD.md. Best-effort."""
+    if shutil.which("claude") is None:
+        return False
+    imgs = [str(f.relative_to(item_dir)) for f in item_dir.rglob("*")
+            if f.suffix.lower().lstrip(".") in (RASTER | VECTOR)][:8]
+    tree = [str(f.relative_to(item_dir)) for f in sorted(item_dir.rglob("*"))
+            if f.is_file() and f.name != _lib.META_NAME][:60]
+    text_ctx = gather_text(item_dir)
+    prompt = f"""Você é um bibliotecário de design catalogando um recurso para
+uma biblioteca de referência de desenvolvimento. O objetivo é que, no futuro,
+uma IA busque este item por tema e ESTUDE como ele foi feito para reusar o
+design. Seja concreto e útil para reuso.
+
+Tipo já classificado: {meta['tipo']}. Pasta: {item_dir}.
+Arquivos (use as ferramentas Read/Glob para inspecionar de verdade —
+principalmente as imagens e o HTML/CSS, não chute):
+{chr(10).join(tree) or '(nenhum)'}
+
+Imagens de preview:
+{chr(10).join(imgs) or '(nenhuma)'}
+
+Contexto textual encontrado:
+{text_ctx or '(nenhum)'}
+
+Responda com DOIS blocos, nesta ordem:
+
+Bloco 1 — ```yaml com exatamente estes campos:
+descricao: uma frase objetiva em português (o que é / quando usar)
+dominio: lista de temas/verticais em kebab-case (ex.: academia, fitness, saude)
+tags: lista de 4 a 8 tags curtas em kebab-case (tema + tech + tipo de página)
+estilo: lista de 0 a 3 estilos visuais (flat, minimal, dark, gradient, etc.)
+licenca: uma de [uso-livre, atribuicao, comercial, pessoal, desconhecida]
+
+Bloco 2 — ```markdown com uma ficha de estudo curta e prática:
+## Propósito e público
+## Estrutura / seções (liste as seções ou telas principais)
+## Design (paleta de cores com hex se der, tipografia, layout, padrões)
+## Como reutilizar (o que copiar/adaptar ao construir algo do mesmo tema)
+"""
+    try:
+        out = subprocess.run(
+            ["claude", "-p", prompt, "--allowedTools", "Read", "Glob"],
+            cwd=str(item_dir), capture_output=True, text=True, timeout=240,
+        )
+    except Exception as e:
+        log(f"IA indisponível ({e}); mantendo descrição pendente")
+        return False
+    text = out.stdout
+    yaml_m = re.search(r"```yaml\s*(.*?)```", text, re.S)
+    md_m = re.search(r"```markdown\s*(.*?)```", text, re.S)
+    parsed = _lib.load(yaml_m.group(1)) if yaml_m else {}
+
+    changed = False
+    if parsed.get("descricao"):
+        meta["descricao"] = parsed["descricao"]
+        changed = True
+    def as_list(v):
+        if isinstance(v, list):
+            return v
+        return [x.strip() for x in str(v).strip("[]").split(",") if x.strip()]
+
+    for key in ("dominio", "tags", "estilo"):
+        if parsed.get(key):
+            existing = as_list(meta.get(key, []))
+            meta[key] = list(dict.fromkeys(existing + as_list(parsed[key])))
+    if parsed.get("licenca"):
+        meta["licenca"] = parsed["licenca"]
+
+    if md_m:
+        card = "# " + meta["nome"] + "\n\n" + md_m.group(1).strip() + "\n"
+        (item_dir / "CARD.md").write_text(card, encoding="utf-8")
+        log("ficha de estudo: CARD.md")
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# Processamento de um item
+# ---------------------------------------------------------------------------
+def process(src: Path, use_ai: bool) -> None:
+    print(f"\n▸ {src.name}")
+    slug = slugify(src.name)
+    staging = PROCESSING / slug
+    if staging.exists():
+        shutil.rmtree(staging)
+    extract(src, staging)
+
+    files = [f for f in staging.rglob("*") if f.is_file()]
+    if not files:
+        log("vazio; ignorando")
+        shutil.rmtree(staging, ignore_errors=True)
+        return
+
+    cat, conf, formato, estilo = classify(files, src.name)
+    tipo = TIPO.get(cat, "desconhecido")
+    log(f"classificado: {cat}  (confiança: {conf})")
+
+    dest = unique_dir((ROOT / cat) / slug)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(staging), str(dest))
+
+    meta = {
+        "nome": slug,
+        "tipo": tipo,
+        "origem": "envato" if "envato" in src.name.lower() else "desconhecida",
+        "data_ingestao": datetime.date.today().isoformat(),
+        "formato": formato,
+        "dominio": [],
+        "tags": [tipo] + estilo if tipo != "desconhecido" else estilo,
+        "estilo": estilo,
+        "descricao": "[pendente-ia]",
+        "licenca": "desconhecida",
+        "arquivo_original": src.name,
+        "confianca": conf,
+        "obs": "revisar categoria manualmente" if cat == "_review" else "",
+    }
+
+    if use_ai and cat != "_review":
+        log("enriquecendo com IA…")
+        if enrich_ai(dest, meta):
+            log(f"descrição: {meta['descricao']}")
+    _lib.write_meta(dest, meta)
+
+    # arquiva o original
+    ARCHIVE.mkdir(exist_ok=True)
+    archived = unique_dir(ARCHIVE / src.name) if (ARCHIVE / src.name).exists() \
+        else ARCHIVE / src.name
+    shutil.move(str(src), str(archived))
+    log(f"→ {dest.relative_to(ROOT)}  (original em _archive/)")
+
+
+def main() -> None:
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    use_ai = "--no-ai" not in sys.argv and \
+        os.environ.get("INGEST_NO_AI") not in ("1", "true")
+
+    if args:
+        targets = [Path(a).resolve() for a in args]
+    else:
+        targets = sorted(f for f in INBOX.iterdir()
+                         if f.is_file() and f.name != ".keep")
+
+    if not targets:
+        print("Nada para processar. Solte arquivos em _inbox/ ou passe um caminho.")
+        return
+
+    for t in targets:
+        if not t.exists():
+            print(f"! não encontrado: {t}")
+            continue
+        try:
+            process(t, use_ai)
+        except Exception as e:
+            print(f"! erro processando {t.name}: {e}")
+
+    # regenera o índice
+    subprocess.run([sys.executable, str(ROOT / "bin" / "reindex")])
+
+
+if __name__ == "__main__":
+    main()

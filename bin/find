@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""find — busca na dev-library por tema/palavra-chave (e opcional por IA).
+
+Uso:
+    bin/find academia fitness           busca por palavras-chave (ranqueado)
+    bin/find "loja de roupa" --tipo templates
+    bin/find academia --ai              reordena os candidatos por semelhança (IA)
+    bin/find academia -n 5              limita a 5 resultados
+
+Saída: itens ranqueados com caminho + descrição, para a IA abrir e estudar
+(veja o CARD.md dentro de cada item).
+"""
+from __future__ import annotations
+import sys
+import shutil
+import subprocess
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lib  # noqa: E402
+from _lib import normalize  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+SEARCH_DIRS = ["templates", "boilerplates", "components", "snippets",
+               "brand/logos", "brand/colors", "brand/fonts",
+               "assets/images", "assets/illustrations", "assets/icons",
+               "references", "prompts", "_review"]
+
+# peso de cada campo na pontuação
+WEIGHTS = {"nome": 3, "dominio": 5, "tags": 4, "estilo": 2,
+           "descricao": 2, "tipo": 2, "card": 1}
+
+
+def all_items():
+    for cat in SEARCH_DIRS:
+        base = ROOT / cat
+        if not base.exists():
+            continue
+        for d in sorted(base.iterdir()):
+            if d.is_dir():
+                meta = _lib.read_meta(d)
+                if meta:
+                    yield d, meta
+
+
+def field_text(meta: dict, item_dir: Path, field: str) -> str:
+    if field == "card":
+        card = item_dir / "CARD.md"
+        return card.read_text(errors="ignore") if card.exists() else ""
+    v = meta.get(field, "")
+    if isinstance(v, list):
+        return " ".join(v)
+    return str(v)
+
+
+def score(meta, item_dir, terms) -> int:
+    total = 0
+    for field, w in WEIGHTS.items():
+        blob = normalize(field_text(meta, item_dir, field))
+        for t in terms:
+            total += blob.count(t) * w
+    return total
+
+
+def keyword_search(terms, tipo=None):
+    results = []
+    t = normalize(tipo) if tipo else None
+    for d, meta in all_items():
+        if t:
+            # tolera singular/plural: 'template' ou 'templates', 'logo'/'logos'…
+            aliases = {normalize(meta.get("tipo", "")), normalize(d.parent.name)}
+            if t not in aliases and t.rstrip("s") not in {a.rstrip("s")
+                                                          for a in aliases}:
+                continue
+        s = score(meta, d, terms)
+        if s > 0:
+            results.append((s, d, meta))
+    results.sort(key=lambda x: -x[0])
+    return results
+
+
+def ai_rerank(query, results, limit):
+    """Reordena por semelhança semântica usando o claude CLI (best-effort)."""
+    if shutil.which("claude") is None:
+        return results
+    catalog = []
+    for i, (_, d, m) in enumerate(results[:20]):
+        catalog.append(f"[{i}] {m.get('nome')} | dominio: "
+                       f"{' '.join(m.get('dominio') or [])} | "
+                       f"{m.get('descricao', '')}")
+    prompt = (f"Consulta do desenvolvedor: \"{query}\".\n\nCandidatos:\n"
+              + "\n".join(catalog)
+              + f"\n\nListe os índices dos {limit} itens MAIS relevantes por "
+              "semelhança de tema/design, do melhor para o pior, só os números "
+              "separados por vírgula. Se nada servir, responda: nenhum.")
+    try:
+        out = subprocess.run(["claude", "-p", prompt],
+                             capture_output=True, text=True, timeout=120)
+    except Exception:
+        return results
+    import re
+    idxs = [int(x) for x in re.findall(r"\d+", out.stdout)
+            if int(x) < len(results)]
+    if not idxs:
+        return results
+    seen, ordered = set(), []
+    for i in idxs:
+        if i not in seen:
+            ordered.append(results[i])
+            seen.add(i)
+    return ordered
+
+
+def main():
+    argv = sys.argv[1:]
+    use_ai = "--ai" in argv
+    tipo = None
+    limit = 10
+    terms_raw = []
+    i = 0
+    argv = [a for a in argv if a != "--ai"]
+    while i < len(argv):
+        a = argv[i]
+        if a == "--tipo" and i + 1 < len(argv):
+            tipo = argv[i + 1]; i += 2; continue
+        if a in ("-n", "--limit") and i + 1 < len(argv):
+            limit = int(argv[i + 1]); i += 2; continue
+        terms_raw.append(a); i += 1
+
+    query = " ".join(terms_raw)
+    terms = [normalize(t) for t in query.split() if t]
+    if not terms:
+        print("Uso: bin/find <palavras> [--tipo X] [--ai] [-n N]")
+        return
+
+    results = keyword_search(terms, tipo)
+    if not results:
+        print(f"Nenhum item para: {query}"
+              + (f" (tipo={tipo})" if tipo else ""))
+        return
+
+    if use_ai:
+        results = ai_rerank(query, results, limit)
+
+    print(f"\n{len(results)} resultado(s) para \"{query}\""
+          + (f" [tipo={tipo}]" if tipo else "")
+          + (" [reordenado por IA]" if use_ai else "") + ":\n")
+    for rank, (s, d, meta) in enumerate(results[:limit], 1):
+        rel = d.relative_to(ROOT)
+        dom = " ".join(meta.get("dominio") or []) or "—"
+        card = " · CARD.md" if (d / "CARD.md").exists() else ""
+        print(f"{rank}. {meta.get('nome')}  [{meta.get('tipo')}]")
+        print(f"   {meta.get('descricao', '')}")
+        print(f"   domínio: {dom}   → {rel}/{card}")
+        print()
+
+
+if __name__ == "__main__":
+    main()

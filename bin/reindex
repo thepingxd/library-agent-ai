@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""reindex — regenera INDEX.md a partir dos _meta.yaml da biblioteca."""
+from __future__ import annotations
+import sys
+import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lib  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+
+CATEGORIES = [
+    ("templates", "Templates"),
+    ("boilerplates", "Boilerplates"),
+    ("components", "Componentes"),
+    ("snippets", "Snippets"),
+    ("brand/logos", "Marca · Logos"),
+    ("brand/colors", "Marca · Cores"),
+    ("brand/fonts", "Marca · Fontes"),
+    ("assets/images", "Imagens"),
+    ("assets/illustrations", "Ilustrações"),
+    ("assets/icons", "Ícones"),
+    ("references", "Referências / Docs"),
+    ("prompts", "Prompts"),
+]
+
+
+def items(cat: str):
+    base = ROOT / cat
+    if not base.exists():
+        return []
+    out = []
+    for d in sorted(base.iterdir()):
+        if d.is_dir():
+            meta = _lib.read_meta(d)
+            if meta:
+                out.append((d, meta))
+    return out
+
+
+def esc(s: str) -> str:
+    return str(s).replace("|", "\\|")
+
+
+def main() -> None:
+    lines = [
+        "# INDEX — Catálogo da dev-library",
+        "",
+        "> Gerado automaticamente por `bin/reindex`. **Não edite à mão** — "
+        "edite os `_meta.yaml` e rode o comando de novo.",
+        "",
+        f"_Atualizado em {datetime.date.today().isoformat()}._",
+        "",
+    ]
+
+    total = 0
+    pend = 0
+    body = []
+    for cat, title in CATEGORIES:
+        rows = items(cat)
+        if not rows:
+            continue
+        body.append(f"## {title}  (`{cat}/`)")
+        body.append("")
+        body.append("| Item | Domínio | Descrição | Tags | Ficha | Licença |")
+        body.append("|------|---------|-----------|------|-------|---------|")
+        for d, m in rows:
+            total += 1
+            desc = m.get("descricao", "")
+            if desc == "[pendente-ia]":
+                pend += 1
+            dom = " ".join(m.get("dominio") or []) or "—"
+            tags = " ".join(f"`{t}`" for t in (m.get("tags") or []))
+            path = d.relative_to(ROOT)
+            card = f"[CARD]({path}/CARD.md)" if (d / "CARD.md").exists() else "—"
+            body.append(
+                f"| [{esc(m.get('nome', d.name))}]({path}/) "
+                f"| {esc(dom)} | {esc(desc)} | {tags} | {card} "
+                f"| {esc(m.get('licenca', ''))} |"
+            )
+        body.append("")
+
+    # itens em revisão
+    review = ROOT / "_review"
+    rev = [d for d in review.iterdir() if d.is_dir()] if review.exists() else []
+
+    lines.append(f"**{total} itens catalogados** · {pend} com descrição "
+                 f"pendente de IA · {len(rev)} aguardando revisão manual.")
+    lines.append("")
+    if rev:
+        lines.append("> ⚠️ Itens em `_review/` precisam de decisão manual de "
+                     "categoria: " + ", ".join(f"`{d.name}`" for d in rev))
+        lines.append("")
+    lines.extend(body)
+
+    (ROOT / "INDEX.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"INDEX.md atualizado: {total} itens ({pend} pendentes de IA, "
+          f"{len(rev)} em revisão).")
+
+
+if __name__ == "__main__":
+    main()
